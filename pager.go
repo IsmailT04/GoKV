@@ -8,7 +8,8 @@ import (
 const PageSize = 4096
 
 type Pager struct {
-	file *os.File
+	file      *os.File
+	freePages []int
 }
 
 func NewPager(filename string) (*Pager, error) {
@@ -55,3 +56,24 @@ func (p *Pager) Sync() error {
 func (p *Pager) Close() error {
 	return p.file.Close()
 }
+
+func (p *Pager) GetFreePage() int {
+	if len(p.freePages) > 0 {
+		lastIndex := len(p.freePages) - 1
+		pageID := p.freePages[lastIndex]
+		p.freePages = p.freePages[:lastIndex]
+		return pageID
+	}
+
+	info, err := p.file.Stat()
+	if err != nil {
+		panic(fmt.Errorf("could not stat file: %w", err))
+	}
+
+	return int(info.Size() / PageSize)
+}
+
+func (p *Pager) ReleasePage(pageID int) {
+	p.freePages = append(p.freePages, pageID)
+}
+
