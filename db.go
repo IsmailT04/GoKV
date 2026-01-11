@@ -30,6 +30,34 @@ func (db *DB) Get(key []byte) ([]byte, error) {
 	return result, nil
 }
 
+func Open(filename string) (*DB, error) {
+	pager, err := NewPager(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if file is new (size 0)
+	info, err := pager.file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	if info.Size() == 0 {
+		// Bootstrap: Create Page 0 as an empty Leaf
+		// This ensures db.Root = 0 is valid
+		rootNode := &Node{data: make([]byte, PageSize)}
+		rootNode.data[0] = byte(NodeLeaf) // Type Leaf
+		// Key count is 0 by default (bytes 1-2 are 0)
+
+		pager.Write(0, rootNode.data)
+	}
+
+	return &DB{
+		Pager: pager,
+		Root:  0, // Always start at 0. If root splits, we update this in memory.
+	}, nil
+}
+
 // Private Helper (Recursive)
 func (db *DB) findLeaf(pageID int, key []byte) *Node {
 	pageData, err := db.Pager.Read(pageID)
@@ -89,15 +117,20 @@ func (db *DB) Put(key []byte, value []byte) error {
 	binary.LittleEndian.PutUint16(newRoot.data[1:3], 0)
 
 	// get the minimum of the old root (left most)
-	leftNodeData, _ := db.Pager.Read(db.Root)
-	leftNode := &Node{data: leftNodeData}
-	leftKey, _ := leftNode.getLeafKeyValue(0)
+	oldRootData, err := db.Pager.Read(db.Root)
+	if err != nil {
+		return fmt.Errorf("failed to read old root: %w", err)
+	}
+	oldRootNode := &Node{data: oldRootData}
+	firstKey, _ := oldRootNode.getLeafKeyValue(0)
 
-	err = newRoot.insertBranchKey(leftKey, db.Root)
+	// Insert first key pointing to old root (for keys < promoteKey)
+	err = newRoot.insertBranchKey(firstKey, db.Root)
 	if err != nil {
 		return err
 	}
 
+	// Insert promoteKey pointing to new leaf (for keys >= promoteKey)
 	err = newRoot.insertBranchKey(promoteKey, newPageID)
 	if err != nil {
 		return err
@@ -143,6 +176,20 @@ func (db *DB) insertRecursive(pageID int, key []byte, value []byte) (newKey []by
 		newPageID := db.Pager.GetFreePage()
 		newNode := &Node{}
 		promoteKey := node.splitLeaf(newNode)
+
+		// after splitting we need to insert the key that caused the split
+		// determine which  leaf should receive it: key < promoteKey goes to old leaf, key >= promoteKey goes to new leaf
+		if bytes.Compare(key, promoteKey) < 0 {
+			err = node.insertLeafKeyValue(key, value)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to insert key into old leaf after split: %w", err)
+			}
+		} else {
+			err = newNode.insertLeafKeyValue(key, value)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to insert key into new leaf after split: %w", err)
+			}
+		}
 
 		// Write both nodes to disk
 		err = db.Pager.Write(pageID, node.data)
