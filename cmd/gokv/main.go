@@ -26,8 +26,9 @@ func main() {
 	// 4096 / 21 ≈ 190 entries per page.
 	// Inserting 250 entries guarantees a split!
 
+	testCount := 1000000
 	fmt.Println("Starting insertions...")
-	for i := 0; i < 250; i++ {
+	for i := 0; i < testCount; i++ {
 		key := []byte(fmt.Sprintf("user:%04d", i)) // Pad with zeros for sorting: user:0001
 		val := []byte(fmt.Sprintf("value:%d", i))
 
@@ -37,7 +38,7 @@ func main() {
 		}
 
 		// Monitor the Root ID
-		if i%50 == 0 {
+		if i%1000 == 0 {
 			fmt.Printf("Inserted %d keys. Root Page ID is now: %d\n", i, db.Root)
 		}
 	}
@@ -51,7 +52,7 @@ func main() {
 
 	// 4. Verify Data (Read Back)
 	fmt.Println("Verifying data...")
-	for i := 0; i < 250; i++ {
+	for i := 0; i < testCount; i++ {
 		key := []byte(fmt.Sprintf("user:%04d", i))
 		expectedVal := []byte(fmt.Sprintf("value:%d", i))
 
