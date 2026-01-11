@@ -7,10 +7,8 @@ import (
 )
 
 func main() {
-	// 1. Clean up old test data
 	os.Remove("test.db")
 
-	// 2. Open DB
 	db, err := gokv.Open("test.db")
 	if err != nil {
 		panic(err)
@@ -19,17 +17,10 @@ func main() {
 
 	fmt.Printf("Initial Root Page ID: %d\n", db.Root)
 
-	// 3. Insert Data
-	// A Leaf holds ~4KB.
-	// Key="user:X" (6 bytes), Val="value:X" (7 bytes).
-	// Overhead = 6 (header) + 2 (offset) = 8. Total per entry ~21 bytes.
-	// 4096 / 21 ≈ 190 entries per page.
-	// Inserting 250 entries guarantees a split!
-
 	testCount := 1000000
 	fmt.Println("Starting insertions...")
 	for i := 0; i < testCount; i++ {
-		key := []byte(fmt.Sprintf("user:%04d", i)) // Pad with zeros for sorting: user:0001
+		key := []byte(fmt.Sprintf("user:%04d", i))
 		val := []byte(fmt.Sprintf("value:%d", i))
 
 		err := db.Put(key, val)
@@ -37,7 +28,6 @@ func main() {
 			panic(fmt.Sprintf("Insert failed at %d: %v", i, err))
 		}
 
-		// Monitor the Root ID
 		if i%1000 == 0 {
 			fmt.Printf("Inserted %d keys. Root Page ID is now: %d\n", i, db.Root)
 		}
@@ -50,7 +40,6 @@ func main() {
 		fmt.Println("SUCCESS: Root split detected! Tree height increased.")
 	}
 
-	// 4. Verify Data (Read Back)
 	fmt.Println("Verifying data...")
 	for i := 0; i < testCount; i++ {
 		key := []byte(fmt.Sprintf("user:%04d", i))
