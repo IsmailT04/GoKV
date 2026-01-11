@@ -1,6 +1,10 @@
 package gokv
 
-import "encoding/binary"
+import (
+	"bytes"
+	"encoding/binary"
+	"sort"
+)
 
 const (
 	// Node Types
@@ -53,18 +57,36 @@ func (n *Node) getLeafKeyValue(index uint16) ([]byte, []byte) {
 func (n *Node) writeLeafKeyValue(index uint16, offset uint16, key []byte, val []byte) {
 	//put offset
 	offsetPos := int(NodeHeaderSize + index*OffsetSize)
-    binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], offset)
+	binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], offset)
 
-    dataPos := int(offset)
-    //put keyLength and value length
-    binary.LittleEndian.PutUint16(n.data[dataPos:dataPos+KeyLenSize], uint16(len(key)))
-    
-    binary.LittleEndian.PutUint16(n.data[dataPos+KeyLenSize:dataPos+KVHeaderSize], uint16(len(val)))
+	dataPos := int(offset)
+	//put keyLength and value length
+	binary.LittleEndian.PutUint16(n.data[dataPos:dataPos+KeyLenSize], uint16(len(key)))
 
-    keyStart := dataPos + KVHeaderSize
-    valStart := keyStart + len(key)
-    
+	binary.LittleEndian.PutUint16(n.data[dataPos+KeyLenSize:dataPos+KVHeaderSize], uint16(len(val)))
+
+	keyStart := dataPos + KVHeaderSize
+	valStart := keyStart + len(key)
+
 	//copy key and value
-    copy(n.data[keyStart:valStart], key)
-    copy(n.data[valStart:valStart+len(val)], val)
+	copy(n.data[keyStart:valStart], key)
+	copy(n.data[valStart:valStart+len(val)], val)
+}
+
+func (n *Node) findKeyInNode(key []byte) (uint16, bool) {
+	count := int(n.getKeyCount())
+
+	comparator := func(i int) bool {
+		nodeKey, _ := n.getLeafKeyValue(uint16(i))
+		return bytes.Compare(nodeKey, key) >= 0
+	}
+
+	index := sort.Search(count, comparator)
+
+	found := false
+	if index < count {
+		nodeKey, _ := n.getLeafKeyValue(uint16(index))
+		found = bytes.Equal(nodeKey, key)
+	}
+	return uint16(index), found 
 }
