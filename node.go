@@ -88,5 +88,11 @@ func (n *Node) findKeyInNode(key []byte) (uint16, bool) {
 		nodeKey, _ := n.getLeafKeyValue(uint16(index))
 		found = bytes.Equal(nodeKey, key)
 	}
-	return uint16(index), found 
+	return uint16(index), found
+}
+
+func (n *Node) getChild(index uint16) int {
+	_, pageID := n.getLeafKeyValue(index)
+
+	return int(binary.LittleEndian.Uint64(pageID))
 }
