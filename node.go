@@ -38,12 +38,16 @@ func (n *Node) getKeyCount() uint16 {
 
 func (n *Node) getOffset(index uint16) uint16 {
 	pos := NodeHeaderSize + OffsetSize*int(index)
-
 	return binary.LittleEndian.Uint16(n.data[pos : pos+OffsetSize])
 }
 
 func (n *Node) getLeafKeyValue(index uint16) ([]byte, []byte) {
 	offset := int(n.getOffset(index))
+
+	// Bounds check: ensure offset is valid
+	if offset+KVHeaderSize > len(n.data) {
+		panic(fmt.Errorf("CORRUPTION: invalid offset %d for index %d: exceeds page size", offset, index))
+	}
 
 	keyLen := int(binary.LittleEndian.Uint16(n.data[offset : offset+KeyLenSize]))
 	valLen := int(binary.LittleEndian.Uint16(n.data[offset+KeyLenSize : offset+KVHeaderSize]))
@@ -52,10 +56,21 @@ func (n *Node) getLeafKeyValue(index uint16) ([]byte, []byte) {
 	keyEnd := start + keyLen
 	valEnd := keyEnd + valLen
 
+	// Bounds check: ensure we don't read beyond page
+	if valEnd > len(n.data) {
+		panic(fmt.Errorf("CORRUPTION: data at index %d extends beyond page: offset=%d, keyLen=%d, valLen=%d, valEnd=%d, pageSize=%d", index, offset, keyLen, valLen, valEnd, len(n.data)))
+	}
+
 	return n.data[start:keyEnd], n.data[keyEnd:valEnd]
 }
 
 func (n *Node) writeLeafKeyValue(index uint16, offset uint16, key []byte, val []byte) {
+	// Safety Check: Ensure we are not writing out of bounds
+	requiredSpace := KVHeaderSize + len(key) + len(val)
+	if int(offset)+requiredSpace > len(n.data) {
+		panic(fmt.Errorf("write overflow: trying to write %d bytes at offset %d, page size %d", requiredSpace, offset, len(n.data)))
+	}
+
 	//put offset
 	offsetPos := int(NodeHeaderSize + index*OffsetSize)
 	binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], offset)
@@ -63,7 +78,6 @@ func (n *Node) writeLeafKeyValue(index uint16, offset uint16, key []byte, val []
 	dataPos := int(offset)
 	//put keyLength and value length
 	binary.LittleEndian.PutUint16(n.data[dataPos:dataPos+KeyLenSize], uint16(len(key)))
-
 	binary.LittleEndian.PutUint16(n.data[dataPos+KeyLenSize:dataPos+KVHeaderSize], uint16(len(val)))
 
 	keyStart := dataPos + KVHeaderSize
@@ -94,11 +108,9 @@ func (n *Node) findKeyInNode(key []byte) (uint16, bool) {
 
 func (n *Node) getChild(index uint16) int {
 	_, pageID := n.getLeafKeyValue(index)
-
 	return int(binary.LittleEndian.Uint64(pageID))
 }
 
-// for now just insert split will be implemented later
 func (n *Node) insertLeafKeyValue(key []byte, value []byte) error {
 	index, found := n.findKeyInNode(key)
 	if found {
@@ -106,16 +118,9 @@ func (n *Node) insertLeafKeyValue(key []byte, value []byte) error {
 	}
 
 	count := n.getKeyCount()
-
-	// check the size of the entry first does this node have the enough space
 	newEntrySize := KVHeaderSize + len(key) + len(value)
-	totalRequired := NodeHeaderSize + int(count+1)*OffsetSize + newEntrySize
 
-	if totalRequired > PageSize {
-		return fmt.Errorf("node is full")
-	}
-
-	//locate the heap data start normally it starts from the beginning with the lowest memory address is offset[0] but lets be safe
+	// 1. Locate the heap data start & end
 	heapStart := PageSize
 	maxEnd := 0
 
@@ -124,7 +129,6 @@ func (n *Node) insertLeafKeyValue(key []byte, value []byte) error {
 		if off < heapStart {
 			heapStart = off
 		}
-
 		kLen := int(binary.LittleEndian.Uint16(n.data[off : off+2]))
 		vLen := int(binary.LittleEndian.Uint16(n.data[off+2 : off+4]))
 		end := off + KVHeaderSize + kLen + vLen
@@ -134,56 +138,46 @@ func (n *Node) insertLeafKeyValue(key []byte, value []byte) error {
 	}
 
 	if count == 0 {
-		heapStart = int(NodeHeaderSize + OffsetSize) // if empty heap starts after first offset slot
+		heapStart = int(NodeHeaderSize + OffsetSize)
 		maxEnd = heapStart
 	}
 
-	// collision detection offset -> <- data
+	// 2. Check for Fragmentation / Collision
 	offsetTableEnd := NodeHeaderSize + int(count+1)*OffsetSize
 
-	if offsetTableEnd > heapStart {
-		shift := OffsetSize
-
-		// check if the data overflows
-		if maxEnd+shift+newEntrySize > PageSize {
-			return fmt.Errorf("node is full (fragmentation)")
-		}
-
-		//shift the data
-		copy(n.data[heapStart+shift:maxEnd+shift], n.data[heapStart:maxEnd])
-
-		// IMPORTANT: Update ALL existing offsets because we moved their data!
-		for i := uint16(0); i < count; i++ {
-			oldOff := n.getOffset(i)
-
-			pos := NodeHeaderSize + int(i)*OffsetSize
-			binary.LittleEndian.PutUint16(n.data[pos:pos+2], oldOff+uint16(shift))
-		}
-
-		// Update our local tracking variables
-		maxEnd += shift
+	// Ensure maxEnd is at least past the offset table
+	if maxEnd < offsetTableEnd {
+		maxEnd = offsetTableEnd
 	}
 
-	// shift offsets at 'index' to the right to open a slot for the new key's offset
+	if offsetTableEnd > heapStart || maxEnd+newEntrySize > PageSize {
+		// COMPACT THE NODE!
+		newEnd, ok := n.compact(true)
+		if !ok {
+			// If compact fails (because reserving space for the offset overflows the page),
+			// then the node is full.
+			return fmt.Errorf("node is full")
+		}
+		maxEnd = int(newEnd)
+
+		// Check again if the NEW DATA fits
+		if maxEnd+newEntrySize > PageSize {
+			return fmt.Errorf("node is full")
+		}
+	}
+
+	// 3. Perform Insertion
+	writePos := maxEnd
+
+	// Shift offsets to make room for the new one at 'index'
 	offsetPos := NodeHeaderSize + int(index)*OffsetSize
 	copy(n.data[offsetPos+OffsetSize:], n.data[offsetPos:NodeHeaderSize+int(count)*OffsetSize])
 
-	writePos := uint16(maxEnd)
+	// Write the new offset and data
+	n.writeLeafKeyValue(index, uint16(writePos), key, value)
 
-	binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], writePos)
-
+	// Update count
 	binary.LittleEndian.PutUint16(n.data[1:3], count+1)
-
-	// actual data writing
-	//for now lets calculate manually later use writeLeafKeyValue for better decoupling
-	curr := int(writePos)
-	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(key)))
-	curr += 2
-	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(value)))
-	curr += 2
-	copy(n.data[curr:], key)
-	curr += len(key)
-	copy(n.data[curr:], value)
 
 	return nil
 }
@@ -222,10 +216,48 @@ func (n *Node) splitLeaf(newNode *Node) []byte {
 
 	//update counts of the two node
 	binary.LittleEndian.PutUint16(newNode.data[1:3], newCount)
-
 	binary.LittleEndian.PutUint16(n.data[1:3], middle)
 
+	// Clean up the original node
+	n.compact(false)
+
 	return promoteKey
+}
+
+func (n *Node) splitBranch(newNode *Node) []byte {
+	count := n.getKeyCount()
+	middle := count / 2
+
+	promoteKey, _ := n.getLeafKeyValue(middle)
+	promoteKeyCopy := make([]byte, len(promoteKey))
+	copy(promoteKeyCopy, promoteKey)
+
+	if len(newNode.data) < PageSize {
+		newNode.data = make([]byte, PageSize)
+	}
+	newNode.data[0] = byte(NodeBranch)
+	binary.LittleEndian.PutUint16(newNode.data[1:3], 0)
+
+	newCount := count - middle
+	newNodeDataOffset := NodeHeaderSize + int(newCount)*OffsetSize
+
+	for i := uint16(0); i < newCount; i++ {
+		oldIndex := middle + i
+		key, rawVal := n.getLeafKeyValue(oldIndex)
+
+		newNode.writeLeafKeyValue(i, uint16(newNodeDataOffset), key, rawVal)
+
+		entrySize := KVHeaderSize + len(key) + len(rawVal)
+		newNodeDataOffset += entrySize
+	}
+
+	binary.LittleEndian.PutUint16(newNode.data[1:3], newCount)
+	binary.LittleEndian.PutUint16(n.data[1:3], middle)
+
+	// Clean up the original node
+	n.compact(false)
+
+	return promoteKeyCopy
 }
 
 func (n *Node) insertBranchKey(key []byte, childPageID int) error {
@@ -236,19 +268,11 @@ func (n *Node) insertBranchKey(key []byte, childPageID int) error {
 
 	count := n.getKeyCount()
 
-	// Convert childPageID to bytes (uint64 = 8 bytes)
 	pageIDBytes := make([]byte, 8)
 	binary.LittleEndian.PutUint64(pageIDBytes, uint64(childPageID))
 
-	// Check the size of the entry
 	newEntrySize := KVHeaderSize + len(key) + len(pageIDBytes)
-	totalRequired := NodeHeaderSize + int(count+1)*OffsetSize + newEntrySize
 
-	if totalRequired > PageSize {
-		return fmt.Errorf("node is full")
-	}
-
-	// Locate the heap data start
 	heapStart := PageSize
 	maxEnd := 0
 
@@ -257,7 +281,6 @@ func (n *Node) insertBranchKey(key []byte, childPageID int) error {
 		if off < heapStart {
 			heapStart = off
 		}
-
 		kLen := int(binary.LittleEndian.Uint16(n.data[off : off+2]))
 		vLen := int(binary.LittleEndian.Uint16(n.data[off+2 : off+4]))
 		end := off + KVHeaderSize + kLen + vLen
@@ -271,48 +294,100 @@ func (n *Node) insertBranchKey(key []byte, childPageID int) error {
 		maxEnd = heapStart
 	}
 
-	// Collision detection: offset -> <- data
 	offsetTableEnd := NodeHeaderSize + int(count+1)*OffsetSize
 
-	if offsetTableEnd > heapStart {
-		shift := OffsetSize
-
-		// Check if the data overflows
-		if maxEnd+shift+newEntrySize > PageSize {
-			return fmt.Errorf("node is full (fragmentation)")
-		}
-
-		// Shift the data
-		copy(n.data[heapStart+shift:maxEnd+shift], n.data[heapStart:maxEnd])
-
-		// Update ALL existing offsets because we moved their data!
-		for i := uint16(0); i < count; i++ {
-			oldOff := n.getOffset(i)
-			pos := NodeHeaderSize + int(i)*OffsetSize
-			binary.LittleEndian.PutUint16(n.data[pos:pos+2], oldOff+uint16(shift))
-		}
-
-		// Update our local tracking variables
-		maxEnd += shift
+	if maxEnd < offsetTableEnd {
+		maxEnd = offsetTableEnd
 	}
 
-	// Shift offsets at 'index' to the right to open a slot for the new key's offset
+	if offsetTableEnd > heapStart || maxEnd+newEntrySize > PageSize {
+		// COMPACT with reserve=true
+		newEnd, ok := n.compact(true)
+		if !ok {
+			return fmt.Errorf("node is full")
+		}
+		maxEnd = int(newEnd)
+
+		if maxEnd+newEntrySize > PageSize {
+			return fmt.Errorf("node is full")
+		}
+	}
+
 	offsetPos := NodeHeaderSize + int(index)*OffsetSize
 	copy(n.data[offsetPos+OffsetSize:], n.data[offsetPos:NodeHeaderSize+int(count)*OffsetSize])
 
-	writePos := uint16(maxEnd)
-	binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], writePos)
+	n.writeLeafKeyValue(index, uint16(maxEnd), key, pageIDBytes)
+
 	binary.LittleEndian.PutUint16(n.data[1:3], count+1)
 
-	// Write the key and pageID
-	curr := int(writePos)
-	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(key)))
-	curr += 2
-	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(pageIDBytes)))
-	curr += 2
-	copy(n.data[curr:], key)
-	curr += len(key)
-	copy(n.data[curr:], pageIDBytes)
-
 	return nil
+}
+
+// compact rewrites the node's data to be perfectly contiguous.
+// If reserveNewEntry is true, it leaves a gap for one additional offset in the offset table.
+// Returns the offset where the next data entry should be written, and a bool indicating success.
+func (n *Node) compact(reserveNewEntry bool) (uint16, bool) {
+	count := n.getKeyCount()
+	if count == 0 {
+		if reserveNewEntry {
+			return uint16(NodeHeaderSize + OffsetSize), true
+		}
+		return uint16(NodeHeaderSize), true
+	}
+
+	// 1. Extract all existing valid KV pairs
+	type kv struct {
+		key []byte
+		val []byte
+	}
+	pairs := make([]kv, count)
+	for i := uint16(0); i < count; i++ {
+		key, val := n.getLeafKeyValue(i)
+		k := make([]byte, len(key))
+		v := make([]byte, len(val))
+		copy(k, key)
+		copy(v, val)
+		pairs[i] = kv{k, v}
+	}
+
+	// 2. Calculate where the data heap should start.
+	offsetCount := int(count)
+	if reserveNewEntry {
+		offsetCount++
+	}
+
+	startPos := NodeHeaderSize + offsetCount*OffsetSize
+
+	// 3. Check if everything fits
+	totalSize := startPos
+	for _, p := range pairs {
+		totalSize += KVHeaderSize + len(p.key) + len(p.val)
+	}
+
+	if totalSize > PageSize {
+		return 0, false // Cannot compact, too full
+	}
+
+	// 4. Rewrite data sequentially
+	currentPos := startPos
+	for i := uint16(0); i < count; i++ {
+		pair := pairs[i]
+
+		// Update Offset
+		binary.LittleEndian.PutUint16(n.data[NodeHeaderSize+int(i)*OffsetSize:], uint16(currentPos))
+
+		// Write KeyLen, ValLen
+		binary.LittleEndian.PutUint16(n.data[currentPos:], uint16(len(pair.key)))
+		currentPos += 2
+		binary.LittleEndian.PutUint16(n.data[currentPos:], uint16(len(pair.val)))
+		currentPos += 2
+
+		// Write Key, Val
+		copy(n.data[currentPos:], pair.key)
+		currentPos += len(pair.key)
+		copy(n.data[currentPos:], pair.val)
+		currentPos += len(pair.val)
+	}
+
+	return uint16(currentPos), true
 }

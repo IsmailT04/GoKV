@@ -232,14 +232,58 @@ func (db *DB) insertRecursive(pageID int, key []byte, value []byte) (newKey []by
 		return nil, 0, nil
 	}
 
+	// 2. Child DID split. We must insert (k, p) into THIS branch node.
 	err = node.insertBranchKey(k, p)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to insert into branch node: %w", err)
-	}
-	err = db.Pager.Write(pageID, node.data)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to write branch page %d: %w", pageID, err)
+
+	// Case A: It fit!
+	if err == nil {
+		err = db.Pager.Write(pageID, node.data)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to write branch page %d: %w", pageID, err)
+		}
+		return nil, 0, nil
 	}
 
-	return nil, 0, nil
+	// Case B: This Branch is ALSO full. We must split it.
+	if err.Error() == "node is full" || err.Error() == "node is full (fragmentation)" {
+		// 1. Create new Branch Node
+		newBranchPageID := db.Pager.GetFreePage()
+		newBranchNode := &Node{data: make([]byte, PageSize)}
+
+		// 2. Split current node into two
+		promoteBranchKey := node.splitBranch(newBranchNode)
+
+		// 3. We still have the key 'k' (from the child split) pending insertion.
+		// We need to decide if it goes into the Old Node (Left) or New Node (Right).
+		// Compare 'k' with 'promoteBranchKey'
+		if bytes.Compare(k, promoteBranchKey) < 0 {
+			// Goes in Left (Old Node)
+			// We know there is space now because we just emptied half of it
+			err = node.insertBranchKey(k, p)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to insert key into old branch node after split: %w", err)
+			}
+		} else {
+			// Goes in Right (New Node)
+			err = newBranchNode.insertBranchKey(k, p)
+			if err != nil {
+				return nil, 0, fmt.Errorf("failed to insert key into new branch node after split: %w", err)
+			}
+		}
+
+		// 4. Write everything to disk
+		// Write Left (Old)
+		if err := db.Pager.Write(pageID, node.data); err != nil {
+			return nil, 0, fmt.Errorf("failed to write old branch page %d: %w", pageID, err)
+		}
+		// Write Right (New)
+		if err := db.Pager.Write(newBranchPageID, newBranchNode.data); err != nil {
+			return nil, 0, fmt.Errorf("failed to write new branch page %d: %w", newBranchPageID, err)
+		}
+
+		// 5. Return the Promoted Key to the parent (causing a split further up!)
+		return promoteBranchKey, newBranchPageID, nil
+	}
+
+	return nil, 0, err
 }
