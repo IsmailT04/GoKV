@@ -3,6 +3,7 @@ package gokv
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"sort"
 )
 
@@ -95,4 +96,94 @@ func (n *Node) getChild(index uint16) int {
 	_, pageID := n.getLeafKeyValue(index)
 
 	return int(binary.LittleEndian.Uint64(pageID))
+}
+
+// for now just insert split will be implemented later
+func (n *Node) insertLeafKeyValue(key []byte, value []byte) error {
+	index, found := n.findKeyInNode(key)
+	if found {
+		return fmt.Errorf("key already exists")
+	}
+
+	count := n.getKeyCount()
+
+	// check the size of the entry first does this node have the enough space
+	newEntrySize := KVHeaderSize + len(key) + len(value)
+	totalRequired := NodeHeaderSize + int(count+1)*OffsetSize + newEntrySize
+
+	if totalRequired > PageSize {
+		return fmt.Errorf("node is full")
+	}
+
+	//locate the heap data start normally it starts from the beginning with the lowest memory address is offset[0] but lets be safe
+	heapStart := PageSize
+	maxEnd := 0
+
+	for i := uint16(0); i < count; i++ {
+		off := int(n.getOffset(i))
+		if off < heapStart {
+			heapStart = off
+		}
+
+		kLen := int(binary.LittleEndian.Uint16(n.data[off : off+2]))
+		vLen := int(binary.LittleEndian.Uint16(n.data[off+2 : off+4]))
+		end := off + KVHeaderSize + kLen + vLen
+		if end > maxEnd {
+			maxEnd = end
+		}
+	}
+
+	if count == 0 {
+		heapStart = int(NodeHeaderSize + OffsetSize) // if empty heap starts after first offset slot
+		maxEnd = heapStart
+	}
+
+	// collision detection offset -> <- data
+	offsetTableEnd := NodeHeaderSize + int(count+1)*OffsetSize
+
+	if offsetTableEnd > heapStart {
+		shift := OffsetSize
+
+		// check if the data overflows
+		if maxEnd+shift+newEntrySize > PageSize {
+			return fmt.Errorf("node is full (fragmentation)")
+		}
+
+		//shift the data
+		copy(n.data[heapStart+shift:maxEnd+shift], n.data[heapStart:maxEnd])
+
+		// IMPORTANT: Update ALL existing offsets because we moved their data!
+		for i := uint16(0); i < count; i++ {
+			oldOff := n.getOffset(i)
+
+			pos := NodeHeaderSize + int(i)*OffsetSize
+			binary.LittleEndian.PutUint16(n.data[pos:pos+2], oldOff+uint16(shift))
+		}
+
+		// Update our local tracking variables
+		maxEnd += shift
+	}
+
+	// shift offsets at 'index' to the right to open a slot for the new key's offset
+	offsetPos := NodeHeaderSize + int(index)*OffsetSize
+	copy(n.data[offsetPos+OffsetSize:], n.data[offsetPos:NodeHeaderSize+int(count)*OffsetSize])
+
+	writePos := uint16(maxEnd)
+
+	binary.LittleEndian.PutUint16(n.data[offsetPos:offsetPos+2], writePos)
+
+	binary.LittleEndian.PutUint16(n.data[1:3], count+1)
+
+	// actual data writing
+	//for now lets calculate manually later use writeLeafKeyValue for better decoupling
+	curr := int(writePos)
+	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(key)))
+	curr += 2
+	binary.LittleEndian.PutUint16(n.data[curr:curr+2], uint16(len(value)))
+	curr += 2
+	copy(n.data[curr:], key)
+	curr += len(key)
+	copy(n.data[curr:], value)
+
+	return nil
 }
