@@ -3,6 +3,7 @@ package gokv
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 )
 
 // DB represents a B-tree database instance with a pager for disk I/O and a root page ID.
@@ -10,6 +11,7 @@ type DB struct {
 	Pager *Pager
 	Root  int
 	Meta  *Meta
+	mu    sync.RWMutex
 }
 
 // Return a new Tx struct
@@ -19,7 +21,7 @@ func (db *DB) Begin(writable bool) (*Tx, error) {
 		writable:   writable,
 		dirtyNodes: make(map[int]*Node),
 		allocated:  []int{},
-		root:       db.Root, // <--- THIS LINE IS CRITICAL
+		root:       db.Root,
 	}, nil
 }
 
@@ -93,6 +95,9 @@ func Open(filename string) (*DB, error) {
 
 // It automatically commits if the function returns nil, or rolls back if it returns an error.
 func (db *DB) Update(fn func(tx *Tx) error) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
 	tx, err := db.Begin(true)
 	if err != nil {
 		return err
@@ -112,12 +117,13 @@ func (db *DB) Update(fn func(tx *Tx) error) error {
 
 // View executes a function within a managed read-only transaction.
 func (db *DB) View(fn func(tx *Tx) error) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
 	tx, err := db.Begin(false)
 	if err != nil {
 		return err
 	}
-
-	// Always rollback a read-only transaction to release resources.
 	defer tx.Rollback()
 
 	return fn(tx)
