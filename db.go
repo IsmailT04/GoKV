@@ -20,10 +20,9 @@ func (db *DB) Begin(writable bool) (*Tx, error) {
 		writable:   writable,
 		dirtyNodes: make(map[int]*Node),
 		allocated:  []int{},
+		root:       db.Root, // <--- THIS LINE IS CRITICAL
 	}, nil
 }
-
-
 
 // Open opens or creates a database file and initializes a DB instance.
 func Open(filename string) (*DB, error) {
@@ -92,7 +91,6 @@ func Open(filename string) (*DB, error) {
 		Meta:  meta,
 	}, nil
 }
-
 
 // Put inserts or updates a key-value pair in the database, handling root splits if necessary.
 func (db *DB) Put(key []byte, value []byte) error {
