@@ -10,6 +10,7 @@ import (
 type DB struct {
 	Pager *Pager
 	Root  int
+	Meta  *Meta
 }
 
 // Get retrieves the value associated with the given key from the database.
@@ -44,16 +45,57 @@ func Open(filename string) (*DB, error) {
 	}
 
 	if info.Size() == 0 {
-		// Bootstrap: Create Page 0 as an empty Leaf to ensure db.Root = 0 is valid
-		rootNode := &Node{data: make([]byte, PageSize)}
-		rootNode.data[0] = byte(NodeLeaf)
+		//New Database
+		meta := &Meta{
+			Magic:    DBMagic,
+			Root:     1,
+			FreeList: 0,
+		}
 
-		pager.Write(0, rootNode.data)
+		metaBytes := make([]byte, PageSize)
+		meta.serialize(metaBytes)
+
+		rootNode := &Node{
+			data: make([]byte, PageSize),
+		}
+		rootNode.data[0] = byte(NodeLeaf)
+		binary.LittleEndian.PutUint16(rootNode.data[1:3], 0) //key count 0
+
+		err = pager.Write(MetaPageID, metaBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to write meta page: %w", err)
+		}
+
+		err = pager.Write(1, rootNode.data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to write root node page: %w", err)
+		}
+
+		// Return DB instance where Root is 1 and meta is the new struct
+		return &DB{
+			Pager: pager,
+			Root:  1,
+			Meta:  meta,
+		}, nil
 	}
 
+	// filesize >0  existing db
+	metabytes, err := pager.Read(MetaPageID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read meta page")
+	}
+
+	meta := &Meta{}
+	meta.deserialize(metabytes)
+
+	if err := meta.validate(); err != nil {
+		return nil, err
+	}
+	// Return a DB instance where Root is set to meta.Root
 	return &DB{
 		Pager: pager,
-		Root:  0,
+		Root:  int(meta.Root),
+		Meta:  meta,
 	}, nil
 }
 
