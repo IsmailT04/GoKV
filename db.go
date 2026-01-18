@@ -13,23 +13,17 @@ type DB struct {
 	Meta  *Meta
 }
 
-// Get retrieves the value associated with the given key from the database.
-func (db *DB) Get(key []byte) ([]byte, error) {
-	leaf := db.findLeaf(db.Root, key)
-
-	index, found := leaf.findKeyInNode(key)
-
-	if !found {
-		return nil, fmt.Errorf("key not found")
-	}
-
-	_, value := leaf.getLeafKeyValue(index)
-
-	result := make([]byte, len(value))
-	copy(result, value)
-
-	return result, nil
+// Return a new Tx struct
+func (db *DB) Begin(writable bool) (*Tx, error) {
+	return &Tx{
+		db:         db,
+		writable:   writable,
+		dirtyNodes: make(map[int]*Node),
+		allocated:  []int{},
+	}, nil
 }
+
+
 
 // Open opens or creates a database file and initializes a DB instance.
 func Open(filename string) (*DB, error) {
@@ -99,41 +93,6 @@ func Open(filename string) (*DB, error) {
 	}, nil
 }
 
-// findLeaf recursively traverses the B-tree from the given page ID to find the leaf node containing the key.
-func (db *DB) findLeaf(pageID int, key []byte) *Node {
-	pageData, err := db.Pager.Read(pageID)
-	if err != nil {
-		panic(fmt.Errorf("failed to read page %d: %w", pageID, err))
-	}
-
-	node := &Node{data: pageData}
-
-	nodeType := node.getType()
-
-	if nodeType == NodeLeaf {
-		return node
-	}
-
-	index, _ := node.findKeyInNode(key)
-
-	// In a branch node, if the key at index is strictly greater than search key,
-	// we need to step back one index to get the correct child.
-	if index < node.getKeyCount() {
-		nodeKey, _ := node.getLeafKeyValue(index)
-		if bytes.Compare(nodeKey, key) > 0 {
-			if index > 0 {
-				index--
-			}
-		}
-	}
-
-	if index >= node.getKeyCount() {
-		index = node.getKeyCount() - 1
-	}
-
-	childPageID := node.getChild(index)
-	return db.findLeaf(childPageID, key)
-}
 
 // Put inserts or updates a key-value pair in the database, handling root splits if necessary.
 func (db *DB) Put(key []byte, value []byte) error {
