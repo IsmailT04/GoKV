@@ -1,59 +1,76 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"gokv"
 	"os"
+	"strings"
 )
 
 func main() {
-	os.Remove("test.db")
-
-	db, err := gokv.Open("test.db")
+	db, err := gokv.Open("my.db")
 	if err != nil {
 		panic(err)
 	}
 	defer db.Pager.Close()
 
-	fmt.Printf("Initial Root Page ID: %d\n", db.Root)
+	fmt.Println("Welcome to GoKV! Type 'help' for commands.")
+	scanner := bufio.NewScanner(os.Stdin)
 
-	testCount := 1000000
-	fmt.Println("Starting insertions...")
-	for i := 0; i < testCount; i++ {
-		key := []byte(fmt.Sprintf("user:%04d", i))
-		val := []byte(fmt.Sprintf("value:%d", i))
-
-		err := db.Put(key, val)
-		if err != nil {
-			panic(fmt.Sprintf("Insert failed at %d: %v", i, err))
+	for {
+		fmt.Print("gokv> ")
+		if !scanner.Scan() {
+			break
+		}
+		line := scanner.Text()
+		parts := strings.Fields(line)
+		if len(parts) == 0 {
+			continue
 		}
 
-		if i%1000 == 0 {
-			fmt.Printf("Inserted %d keys. Root Page ID is now: %d\n", i, db.Root)
+		cmd := parts[0]
+
+		switch cmd {
+		case "put":
+			if len(parts) != 3 {
+				fmt.Println("Usage: put <key> <value>")
+				continue
+			}
+			err := db.Update(func(tx *gokv.Tx) error {
+				return tx.Put([]byte(parts[1]), []byte(parts[2]))
+			})
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+			} else {
+				fmt.Println("OK")
+			}
+
+		case "get":
+			if len(parts) != 2 {
+				fmt.Println("Usage: get <key>")
+				continue
+			}
+			err := db.View(func(tx *gokv.Tx) error {
+				val, err := tx.Get([]byte(parts[1]))
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Value: %s\n", string(val))
+				return nil
+			})
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+			}
+
+		case "exit", "quit":
+			return
+
+		case "help":
+			fmt.Println("Commands: put <k> <v>, get <k>, exit")
+
+		default:
+			fmt.Println("Unknown command")
 		}
 	}
-
-	fmt.Printf("Final Root Page ID: %d\n", db.Root)
-	if db.Root == 0 {
-		fmt.Println("WARNING: Root did not change. Did we actually split?")
-	} else {
-		fmt.Println("SUCCESS: Root split detected! Tree height increased.")
-	}
-
-	fmt.Println("Verifying data...")
-	for i := 0; i < testCount; i++ {
-		key := []byte(fmt.Sprintf("user:%04d", i))
-		expectedVal := []byte(fmt.Sprintf("value:%d", i))
-
-		val, err := db.Get(key)
-		if err != nil {
-			panic(fmt.Sprintf("Read failed for %s: %v", key, err))
-		}
-
-		if string(val) != string(expectedVal) {
-			panic(fmt.Sprintf("Data mismatch! Key: %s, Expected: %s, Got: %s", key, expectedVal, val))
-		}
-	}
-
-	fmt.Println("All 250 keys verified successfully!")
 }
