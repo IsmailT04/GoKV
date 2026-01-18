@@ -175,6 +175,8 @@ func (db *DB) Put(key []byte, value []byte) error {
 	}
 
 	db.Root = newRootID
+	db.Meta.Root = uint32(db.Root)
+	db.writeMeta()
 
 	return nil
 }
@@ -303,4 +305,22 @@ func (db *DB) insertRecursive(pageID int, key []byte, value []byte) (newKey []by
 	}
 
 	return nil, 0, err
+}
+
+func (db *DB) writeMeta() error {
+	buf := make([]byte, PageSize)
+
+	db.Meta.serialize(buf)
+
+	err := db.Pager.Write(MetaPageID, buf)
+	if err != nil {
+		return fmt.Errorf("failed to write meta page: %w", err)
+	}
+
+	err = db.Pager.Sync()
+	if err != nil {
+		return fmt.Errorf("failed to sync meta page: %w", err)
+	}
+
+	return nil
 }
