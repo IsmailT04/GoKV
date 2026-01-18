@@ -10,6 +10,7 @@ const PageSize = 4096
 type Pager struct {
 	file      *os.File
 	freePages []int
+	numPages  int
 }
 
 // NewPager creates a new pager instance for the given filename.
@@ -19,8 +20,15 @@ func NewPager(filename string) (*Pager, error) {
 		return nil, err
 	}
 
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	// Initialize numPages based on current file size
 	return &Pager{
-		file: file,
+		file:     file,
+		numPages: int(info.Size() / PageSize),
 	}, nil
 }
 
@@ -42,6 +50,12 @@ func (p *Pager) Read(pageID int) ([]byte, error) {
 func (p *Pager) Write(pageID int, data []byte) error {
 	if len(data) > PageSize {
 		return fmt.Errorf("data too large for page")
+	}
+
+	// If writing beyond the current known count (e.g., during DB initialization in Open()),
+	// update the counter.
+	if pageID >= p.numPages {
+		p.numPages = pageID + 1
 	}
 
 	offset := int64(pageID * PageSize)
@@ -68,12 +82,10 @@ func (p *Pager) GetFreePage() int {
 		return pageID
 	}
 
-	info, err := p.file.Stat()
-	if err != nil {
-		panic(fmt.Errorf("could not stat file: %w", err))
-	}
-
-	return int(info.Size() / PageSize)
+	// Use the in-memory counter instead of file.Stat()
+	ret := p.numPages
+	p.numPages++
+	return ret
 }
 
 // ReleasePage adds a page ID to the free list for reuse.
